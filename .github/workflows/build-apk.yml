@@ -1,0 +1,82 @@
+name: Build APK
+run-name: Build ${{ inputs.build_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:
+        description: "Build ID"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Unpack ZIP
+        run: |
+          B=builds/${{ inputs.build_id }}
+          mkdir -p web && unzip -q "$B/app.zip" -d web
+          F=$(find web -maxdepth 4 \( -name package.json -o -name index.html \) -not -path '*/node_modules/*' | awk '{print length, $0}' | sort -n | head -1 | cut -d' ' -f2-)
+          echo "SRC=$(dirname "$F")" >> $GITHUB_ENV
+          echo "APP_NAME=$(jq -r .appName $B/config.json)" >> $GITHUB_ENV
+          echo "APP_ID=$(jq -r .appId $B/config.json)" >> $GITHUB_ENV
+          echo "V_CODE=$(jq -r .versionCode $B/config.json)" >> $GITHUB_ENV
+          echo "V_NAME=$(jq -r .versionName $B/config.json)" >> $GITHUB_ENV
+
+      - name: Install dependencies
+        run: |
+          cd "$SRC"
+          if [ -f package.json ]; then
+            npm install --no-audit --no-fund
+            if jq -e '.scripts.build' package.json > /dev/null; then npm run build; fi
+          fi
+          for d in dist build out www .; do
+            if [ -f "$d/index.html" ]; then echo "WEBDIR=$PWD/$d" >> $GITHUB_ENV; break; fi
+          done
+
+      - name: Create Capacitor project
+        run: |
+          mkdir cap && cd cap
+          npm init -y > /dev/null
+          npm i @capacitor/core@7 @capacitor/cli@7 @capacitor/android@7 --no-audit --no-fund
+          mkdir www && cp -r "$WEBDIR"/. www/ && rm -rf www/node_modules
+          npx cap init "$APP_NAME" "$APP_ID" --web-dir www
+          npx cap add android
+          G=android/app/build.gradle
+          sed -i "s/versionCode [0-9]*/versionCode $V_CODE/" $G
+          sed -i "s/versionName \".*\"/versionName \"$V_NAME\"/" $G
+          ICON=../builds/${{ inputs.build_id }}/icon.png
+          if [ -f "$ICON" ]; then
+            rm -rf android/app/src/main/res/mipmap-anydpi-v26
+            for d in android/app/src/main/res/mipmap-*; do
+              cp "$ICON" $d/ic_launcher.png; cp "$ICON" $d/ic_launcher_round.png
+              rm -f $d/ic_launcher_foreground.png
+            done
+          fi
+
+      - name: Build Gradle
+        run: |
+          cd cap/android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Publish APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ inputs.build_id }}
+          name: "${{ env.APP_NAME }} ${{ env.V_NAME }}"
+          files: cap/android/app/build/outputs/apk/debug/app-debug.apk
