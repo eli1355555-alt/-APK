@@ -32,10 +32,10 @@ jobs:
           mkdir -p web && unzip -q "$B/app.zip" -d web
           F=$(find web -maxdepth 4 \( -name package.json -o -name index.html \) -not -path '*/node_modules/*' | awk '{print length, $0}' | sort -n | head -1 | cut -d' ' -f2-)
           echo "SRC=$(dirname "$F")" >> $GITHUB_ENV
-          echo "APP_NAME=$(jq -r .appName $B/config.json)" >> $GITHUB_ENV
-          echo "APP_ID=$(jq -r .appId $B/config.json)" >> $GITHUB_ENV
-          echo "V_CODE=$(jq -r .versionCode $B/config.json)" >> $GITHUB_ENV
-          echo "V_NAME=$(jq -r .versionName $B/config.json)" >> $GITHUB_ENV
+          echo "APP_NAME=$(jq -r '.appName // "MyApp"' $B/config.json)" >> $GITHUB_ENV
+          echo "APP_ID=$(jq -r '.appId // "com.app.builder"' $B/config.json)" >> $GITHUB_ENV
+          echo "V_CODE=$(jq -r '.versionCode // 1' $B/config.json)" >> $GITHUB_ENV
+          echo "V_NAME=$(jq -r '.versionName // "1.0.0"' $B/config.json)" >> $GITHUB_ENV
 
       - name: Install dependencies
         run: |
@@ -53,9 +53,18 @@ jobs:
           mkdir cap && cd cap
           npm init -y > /dev/null
           npm i @capacitor/core@7 @capacitor/cli@7 @capacitor/android@7 --no-audit --no-fund
-          mkdir www && cp -r "$WEBDIR"/. www/ && rm -rf www/node_modules
-          npx cap init "$APP_NAME" "$APP_ID" --web-dir www
-          npx cap add android
+          mkdir -p www && cp -r "$WEBDIR"/. www/ && rm -rf www/node_modules
+
+          SAFE_APP_ID=$(echo "$APP_ID" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9.]/_/g; s/\.\.*/./g; s/^\.//; s/\.$//')
+          case "$SAFE_APP_ID" in *.*) ;; *) SAFE_APP_ID="com.app.${SAFE_APP_ID:-myapp}" ;; esac
+          SAFE_APP_NAME=$(echo "${APP_NAME:-MyApp}" | tr -d '"\\')
+          [ -z "$SAFE_APP_NAME" ] || [ "$SAFE_APP_NAME" = "null" ] && SAFE_APP_NAME="MyApp"
+
+          npx cap init "$SAFE_APP_NAME" "$SAFE_APP_ID" --web-dir www
+          npx cap add android || true
+          mkdir -p android/app/src/main/assets
+          npx cap sync android
+
           G=android/app/build.gradle
           sed -i "s/versionCode [0-9]*/versionCode $V_CODE/" $G
           sed -i "s/versionName \".*\"/versionName \"$V_NAME\"/" $G
@@ -63,7 +72,8 @@ jobs:
           if [ -f "$ICON" ]; then
             rm -rf android/app/src/main/res/mipmap-anydpi-v26
             for d in android/app/src/main/res/mipmap-*; do
-              cp "$ICON" $d/ic_launcher.png; cp "$ICON" $d/ic_launcher_round.png
+              cp "$ICON" $d/ic_launcher.png
+              cp "$ICON" $d/ic_launcher_round.png
               rm -f $d/ic_launcher_foreground.png
             done
           fi
