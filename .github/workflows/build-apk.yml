@@ -1,4 +1,77 @@
-- name: Create Capacitor project
+name: Build APK
+run-name: Build ${{ inputs.build_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:
+        description: "Build ID"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Unpack ZIP
+        run: |
+          B=builds/${{ inputs.build_id }}
+          mkdir -p web && unzip -q "$B/app.zip" -d web
+          PKG=$(find web -maxdepth 6 -name package.json -not -path '*/node_modules/*' | awk '{print length, $0}' | sort -n | head -1 | cut -d' ' -f2-)
+          IDX=$(find web -maxdepth 6 -name index.html -not -path '*/node_modules/*' | awk '{print length, $0}' | sort -n | head -1 | cut -d' ' -f2-)
+          if [ -n "$PKG" ]; then
+            echo "SRC=$(dirname "$PKG")" >> $GITHUB_ENV
+          elif [ -n "$IDX" ]; then
+            echo "SRC=$(dirname "$IDX")" >> $GITHUB_ENV
+          else
+            echo "SRC=$PWD/web" >> $GITHUB_ENV
+          fi
+          echo "APP_NAME=$(jq -r '.appName // "MyApp"' $B/config.json)" >> $GITHUB_ENV
+          echo "APP_ID=$(jq -r '.appId // "com.app.builder"' $B/config.json)" >> $GITHUB_ENV
+          echo "V_CODE=$(jq -r '.versionCode // 1' $B/config.json)" >> $GITHUB_ENV
+          echo "V_NAME=$(jq -r '.versionName // "1.0.0"' $B/config.json)" >> $GITHUB_ENV
+
+      - name: Install dependencies
+        run: |
+          cd "$SRC"
+          if [ -f package.json ]; then
+            npm install --no-audit --no-fund || npm install --legacy-peer-deps --no-audit --no-fund
+            if jq -e '.scripts.build' package.json > /dev/null; then npm run build; fi
+          fi
+          FOUND_WEB=""
+          for d in dist build out www public .; do
+            if [ -f "$d/index.html" ]; then
+              FOUND_WEB="$PWD/$d"
+              break
+            fi
+          done
+          if [ -z "$FOUND_WEB" ]; then
+            DEEP_IDX=$(find "$PWD" -maxdepth 4 -name index.html -not -path '*/node_modules/*' | head -1)
+            if [ -n "$DEEP_IDX" ]; then
+              FOUND_WEB="$(dirname "$DEEP_IDX")"
+            fi
+          fi
+          if [ -z "$FOUND_WEB" ]; then
+            mkdir -p "$PWD/dist"
+            printf '<!doctype html><html><head><meta charset="utf-8"><title>App</title></head><body><div id="root"></div></body></html>\n' > "$PWD/dist/index.html"
+            FOUND_WEB="$PWD/dist"
+          fi
+          echo "WEBDIR=$FOUND_WEB" >> $GITHUB_ENV
+
+      - name: Create Capacitor project
         run: |
           mkdir -p cap && cd cap
           npm init -y > /dev/null
@@ -38,3 +111,16 @@
               rm -f $d/ic_launcher_foreground.png
             done
           fi
+
+      - name: Build Gradle
+        run: |
+          cd cap/android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Publish APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ inputs.build_id }}
+          name: "${{ env.APP_NAME }} ${{ env.V_NAME }}"
+          files: cap/android/app/build/outputs/apk/debug/app-debug.apk
